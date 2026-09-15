@@ -65,6 +65,8 @@ Elecrow's [environment tutorial](https://media-cdn.elecrow.com/wiki/HMI_Display_
 
 ## Hardware acceptance checks
 
+Wi-Fi scans pause automatic reconnection. When offline, the worker restarts the radio and waits for station startup before scanning, then resumes the selected network afterward. This prevents an unfinished connection attempt from blocking network discovery. Connected scans keep the existing connection. Scan completion waits are limited to 15 seconds; failures include a result code on screen and credential-free diagnostics at 115200 baud. See [TESTING_GUIDE.md](TESTING_GUIDE.md) for regression checks.
+
 Compilation and server/browser tests passed. No physical panel was flashed or tested during development. On hardware, verify:
 
 1. Correct 800×480 image, colors, backlight and all touch targets after boot.

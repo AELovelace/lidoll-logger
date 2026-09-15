@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -97,8 +98,19 @@ void networkTask(void *) { // Keep Wi-Fi reconnects, TLS and proxy delays off th
     if(xQueueReceive(wifiCommands,&wifiCommand,0)==pdTRUE){
       WifiReply reply={};reply.type=wifiCommand.type;
       if(wifiCommand.type==WIFI_SCAN){
-        const int found=WiFi.scanNetworks();
-        if(found<0)strlcpy(reply.message,"Wi-Fi scan failed; tap Scan to retry",sizeof(reply.message));
+        const bool autoReconnect=WiFi.getAutoReconnect();WiFi.setAutoReconnect(false); // Prevent background connection attempts from competing with this scan.
+        const bool wasConnected=WiFi.status()==WL_CONNECTED;
+        bool radioReady=true;
+        if(!wasConnected)radioReady=WiFi.mode(WIFI_OFF); // Stop an in-progress join, including the core's first-connect retry; saved credentials are retained.
+        if(radioReady)radioReady=WiFi.STA.begin(false); // Wait for station startup without initiating a connection.
+        WiFi.scanDelete();WiFi.setScanTimeout(15000); // Clear previous results and bound the scan's wait in the network worker.
+        const int found=radioReady?WiFi.scanNetworks():WIFI_SCAN_FAILED;
+        if(found<0){
+          esp_wifi_scan_stop(); // Cancel a timed-out driver scan before clearing Arduino's scan state or reconnecting.
+          if(radioReady)snprintf(reply.message,sizeof(reply.message),"Wi-Fi scan failed (%d); tap Scan to retry",found);
+          else strlcpy(reply.message,"Wi-Fi radio startup failed; tap Scan to retry",sizeof(reply.message));
+          Serial.printf("Wi-Fi scan failed: ready=%d, result=%d, status=%d, freeHeap=%u\n",radioReady,found,int(WiFi.status()),unsigned(ESP.getFreeHeap())); // Diagnose failures without logging network names or credentials.
+        }
         else{
           for(int i=0;i<found&&reply.count<WIFI_RESULTS;i++){
             String ssid=WiFi.SSID(i);if(!ssid.length())continue;
@@ -109,7 +121,10 @@ void networkTask(void *) { // Keep Wi-Fi reconnects, TLS and proxy delays off th
           }
           snprintf(reply.message,sizeof(reply.message),"Found %u network(s)",reply.count);reply.ok=true;
         }
-        WiFi.scanDelete();
+        WiFi.scanDelete();WiFi.setAutoReconnect(autoReconnect); // Release scan memory and restore the normal connection policy on success or failure.
+        if(WiFi.status()!=WL_CONNECTED&&activeSsid.length()){
+          WiFi.begin(activeSsid.c_str(),activePassword.c_str());reconnect=millis(); // Resume the saved network only after the scan has finished.
+        }
       }else{
         const String oldSsid=activeSsid,oldPassword=activePassword;
         WiFi.disconnect();WiFi.begin(wifiCommand.ssid,wifiCommand.password);
@@ -131,7 +146,7 @@ void networkTask(void *) { // Keep Wi-Fi reconnects, TLS and proxy delays off th
     if(xQueueReceive(requests,&wanted,pdMS_TO_TICKS(250))!=pdTRUE)continue;
     Snapshot out={};out.serial=wanted.serial;out.index=wanted.index;out.directoryOnly=wanted.directoryOnly;
     if(WiFi.status()!=WL_CONNECTED){
-      if(millis()-reconnect>=15000){WiFi.reconnect();reconnect=millis();}
+      if(activeSsid.length()&&millis()-reconnect>=15000){WiFi.reconnect();reconnect=millis();} // A first-boot device has no selected network to retry.
       strlcpy(out.message,"Connecting to Wi-Fi; automatic retry",sizeof(out.message));xQueueOverwrite(results,&out);continue;
     }
     JsonDocument directory;
